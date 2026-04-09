@@ -57,6 +57,7 @@ program
         const token = process.env.TOKEN;
         const downloadDir = process.env.DOWNLOAD_DIR || 'downloads';
         const preferredRes = parseInt(process.env.PREFERRED_RESOLUTION || '720');
+        const cdrMUrl = process.env.CDRM_URL || 'https://cdrm-project.com/api/decrypt';
 
         if (!batchId || !token) {
             console.error('Please set BATCH_ID and TOKEN in your .env file');
@@ -64,6 +65,7 @@ program
         }
 
         console.log(`--- Starting Download Phase (L-Concurrency: ${options.concurrency}, C-Concurrency: ${options.chunkConcurrency}, Res: ${preferredRes}p) ---`);
+        console.log(`--- CDRM endpoint: ${cdrMUrl} ---`);
         const downloader = new Downloader(
             db,
             token,
@@ -71,7 +73,8 @@ program
             parseInt(options.concurrency),
             parseInt(options.chunkConcurrency),
             downloadDir,
-            preferredRes
+            preferredRes,
+            cdrMUrl
         );
 
         const { Dashboard } = require('./lib/dashboard');

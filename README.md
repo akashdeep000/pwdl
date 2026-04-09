@@ -2,6 +2,20 @@
 
 PhysicsWallah Batch Downloader
 
+## Prerequisites
+
+### DRM Decryption (CDRM)
+
+This tool requires a CDRM (Content Decryption Module) service to decrypt Widevine-protected videos. The public CDRM service at `cdrm-project.com` is currently unavailable.
+
+**Options:**
+
+1. **Self-host CDRM-Project**: 
+   - Follow instructions at https://github.com/tpd94/CDRM-Project
+   - Set `CDRM_URL=http://your-server:5000/api/decrypt` in `.env`
+
+2. **Use a friend's instance** if they have one running
+
 ## Setup
 
 1. Install dependencies:
@@ -19,6 +33,7 @@ PREFERRED_RESOLUTION=720  # optional, default 720
 DOWNLOAD_DIR=downloads     # optional
 CONCURRENCY=1             # optional, default 1
 CHUNK_CONCURRENCY=5        # optional, default 5
+CDRM_URL=https://your-cdrm-server.com/api/decrypt  # required for downloads
 ```
 
 ## Usage
@@ -55,3 +70,15 @@ bun . download -l 10
 # Download specific lecture
 bun . download -i "lecture_id_here"
 ```
+
+## Troubleshooting
+
+### Downloads failing silently
+Run with a single lecture to see detailed logs:
+```bash
+bun . download -i "lecture_id" -l 1
+```
+
+### CDRM API errors
+- "Connection timed out" - The CDRM server is unreachable. Check `CDRM_URL` in `.env`.
+- "CDRM API failed" - The server responded but returned an error. Check server logs.
