@@ -18,6 +18,41 @@ function log(lectureId: string, step: string, message: string, data?: any) {
     console.log(logLine + (data ? ` ${JSON.stringify(data)}` : ''));
 }
 
+function getDiskUsage(dir: string): { total: number; used: number; free: number; percent: number } {
+    // Ensure directory exists
+    if (!fs.existsSync(dir)) {
+        fs.ensureDirSync(dir);
+    }
+
+    try {
+        const output = execSync(`df -B1 "${dir}"`, { encoding: 'utf8' });
+        const lines = output.trim().split('\n');
+        if (lines.length >= 2) {
+            const line = lines[1] ?? '';
+            const parts = line.split(/\s+/);
+            const total = parseInt(parts[1] ?? '0', 10) || 0;
+            const used = parseInt(parts[2] ?? '0', 10) || 0;
+            const free = parseInt(parts[3] ?? '0', 10) || 0;
+            const percent = total > 0 ? Math.round((used / total) * 100) : 0;
+            return { total, used, free, percent };
+        }
+    } catch (e: any) {
+        console.error('Failed to get disk usage:', e.message);
+    }
+    return { total: 0, used: 0, free: 0, percent: 0 };
+}
+
+function formatBytes(bytes: number): string {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let unitIndex = 0;
+    let size = bytes;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex++;
+    }
+    return `${size.toFixed(2)} ${units[unitIndex]}`;
+}
+
 export class Downloader {
     private db: Database;
     private token: string;
@@ -29,8 +64,12 @@ export class Downloader {
     private preferredResolution: number;
     private agent: https.Agent;
     private cdrMUrl: string;
+    private storageThreshold: number = 95;
+    private isPaused: boolean = false;
+    private pauseResolve: (() => void) | null = null;
+    private diskCheckInterval: NodeJS.Timeout | null = null;
 
-    constructor(db: Database, token: string, batchId: string, lectureConcurrency: number = 3, chunkConcurrency: number = 5, downloadDir: string = 'downloads', preferredRes: number = 720, cdrMUrl: string = 'https://cdrm-project.com/api/decrypt') {
+    constructor(db: Database, token: string, batchId: string, lectureConcurrency: number = 3, chunkConcurrency: number = 5, downloadDir: string = 'downloads', preferredRes: number = 720, cdrMUrl: string = 'https://cdrm-project.com/api/decrypt', storageThreshold: number = 95) {
         this.db = db;
         this.token = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
         this.batchId = batchId;
@@ -39,6 +78,7 @@ export class Downloader {
         this.chunkConcurrency = chunkConcurrency;
         this.preferredResolution = preferredRes;
         this.cdrMUrl = cdrMUrl;
+        this.storageThreshold = storageThreshold;
 
         // Persistent agent for better performance at high concurrency
         this.agent = new https.Agent({
@@ -66,7 +106,67 @@ export class Downloader {
         };
     }
 
+    private async checkAndPauseForStorage() {
+        const usage = getDiskUsage(this.downloadDir);
+
+        if (!this.isPaused && usage.percent >= this.storageThreshold) {
+            console.log(`\n⚠️  STORAGE: ${usage.percent}% used (threshold: ${this.storageThreshold}%)`);
+            console.log(`    Total: ${formatBytes(usage.total)} | Used: ${formatBytes(usage.used)} | Free: ${formatBytes(usage.free)}`);
+            console.log(`    ⏸️  Pausing downloads... Please free up space to resume.\n`);
+            this.isPaused = true;
+            this.lectureQueue.pause();
+            this.startStorageMonitor();
+        }
+
+        return usage;
+    }
+
+    private startStorageMonitor() {
+        if (this.diskCheckInterval) return;
+
+        this.diskCheckInterval = setInterval(() => {
+            const usage = getDiskUsage(this.downloadDir);
+
+            console.log(`🔄 STORAGE CHECK: ${usage.percent}% used | Free: ${formatBytes(usage.free)}`);
+
+            if (this.isPaused && usage.percent < this.storageThreshold) {
+                console.log(`\n✅ STORAGE: Space available (${usage.percent}%) - Resuming downloads...\n`);
+                this.isPaused = false;
+                this.lectureQueue.start();
+                if (this.diskCheckInterval) {
+                    clearInterval(this.diskCheckInterval);
+                    this.diskCheckInterval = null;
+                }
+            }
+        }, 5000);
+    }
+
+    public getStorageStatus() {
+        const usage = getDiskUsage(this.downloadDir);
+        return {
+            ...usage,
+            isPaused: this.isPaused,
+            threshold: this.storageThreshold
+        };
+    }
+
+    public printStorageStatus() {
+        const usage = getDiskUsage(this.downloadDir);
+        console.log(`💾 STORAGE: ${usage.percent}% used | ${formatBytes(usage.free)} free of ${formatBytes(usage.total)}`);
+        if (this.isPaused) {
+            console.log(`    ⏸️  Downloads PAUSED (threshold: ${this.storageThreshold}%)`);
+        }
+        return usage;
+    }
+
+    public isStoragePaused(): boolean {
+        return this.isPaused;
+    }
+
     async downloadAll(limit?: number, specificId?: string) {
+        console.log(`\n💾 STORAGE: Checking disk space before download...`);
+        await this.printStorageStatus();
+
         let query = 'SELECT l.*, t.name as topic_name, s.name as subject_name FROM lectures l JOIN topics t ON l.topic_id = t.id JOIN subjects s ON t.subject_id = s.id WHERE l.status != "COMPLETED"';
         if (specificId) {
             query += ` AND l.id = "${specificId}"`;
@@ -89,6 +189,9 @@ export class Downloader {
     }
 
     private async downloadLecture(lecture: any) {
+        // Check storage before starting each lecture
+        await this.checkAndPauseForStorage();
+
         const topicDir = path.join(this.downloadDir, lecture.subject_name.replace(/[/\\?%*:|"<>]/g, '_'), lecture.topic_name.replace(/[/\\?%*:|"<>]/g, '_'));
         const finalPath = path.join(topicDir, `${lecture.name.replace(/[/\\?%*:|"<>]/g, '_')}.mp4`);
         const lid = lecture.id.substring(0, 8);
@@ -277,6 +380,9 @@ export class Downloader {
         const chunkQueue = new PQueue({ concurrency: this.chunkConcurrency });
 
         const downloadChunkTask = (type: string, res: string, i: number, segment: any) => () => pRetry(async () => {
+            // Check storage before each chunk download
+            await this.checkAndPauseForStorage();
+
             const row = this.db.query('SELECT status FROM chunks WHERE lecture_id = ? AND type = ? AND resolution = ? AND segment_index = ?').get(lecture.id, type, res, i) as any;
             if (row.status !== 'COMPLETED') {
                 const chunkUrl = i === -1 ? (baseUrl + segment.map.uri + signature) : (baseUrl + segment.uri + signature);

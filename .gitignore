@@ -39,3 +39,6 @@ batch_progress.db
 
 # Downloads directory
 downloads
+
+# Test output
+test_output

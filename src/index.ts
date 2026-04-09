@@ -52,6 +52,7 @@ program
     .option('-C, --chunk-concurrency <number>', 'Number of concurrent chunks per lecture', process.env.CHUNK_CONCURRENCY || '5')
     .option('-l, --limit <number>', 'Limit the number of lectures to download')
     .option('-i, --id <string>', 'Download a specific lecture by ID')
+    .option('-t, --storage-threshold <number>', 'Storage threshold percentage to pause at', process.env.STORAGE_THRESHOLD || '95')
     .action(async (options) => {
         const batchId = process.env.BATCH_ID;
         const token = process.env.TOKEN;
@@ -66,6 +67,8 @@ program
 
         console.log(`--- Starting Download Phase (L-Concurrency: ${options.concurrency}, C-Concurrency: ${options.chunkConcurrency}, Res: ${preferredRes}p) ---`);
         console.log(`--- CDRM endpoint: ${cdrMUrl} ---`);
+        console.log(`--- Storage threshold: ${options.storageThreshold}% ---\n`);
+        
         const downloader = new Downloader(
             db,
             token,
@@ -74,18 +77,29 @@ program
             parseInt(options.chunkConcurrency),
             downloadDir,
             preferredRes,
-            cdrMUrl
+            cdrMUrl,
+            parseInt(options.storageThreshold)
         );
 
         const { Dashboard } = require('./lib/dashboard');
         const dashboard = new Dashboard(db);
+        dashboard.setDownloadDir(downloadDir);
+        dashboard.setStorageThreshold(parseInt(options.storageThreshold));
         dashboard.start();
+
+        // Sync paused state to dashboard every 2 seconds
+        const syncInterval = setInterval(() => {
+            try {
+                dashboard.setPaused(downloader.isStoragePaused());
+            } catch (e) {}
+        }, 2000);
 
         await downloader.downloadAll(
             options.limit ? parseInt(options.limit) : undefined,
             options.id
         );
         
+        clearInterval(syncInterval);
         dashboard.stop();
         console.log('Download phase finished.');
     });

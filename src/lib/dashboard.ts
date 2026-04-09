@@ -1,11 +1,67 @@
 import { Database } from 'bun:sqlite';
+import { execSync } from 'child_process';
+import fs from 'fs-extra';
+import path from 'path';
+
+function formatBytes(bytes: number): string {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let unitIndex = 0;
+    let size = bytes;
+    while (size >= 1024 && unitIndex < units.length - 1) {
+        size /= 1024;
+        unitIndex++;
+    }
+    return `${size.toFixed(1)} ${units[unitIndex]}`;
+}
 
 export class Dashboard {
     private db: Database;
     private interval: any;
+    private downloadDir: string = 'downloads';
+    private storageThreshold: number = 95;
+    private isPaused: boolean = false;
 
     constructor(db: Database) {
         this.db = db;
+    }
+
+    setDownloadDir(dir: string) {
+        this.downloadDir = dir;
+    }
+
+    setStorageThreshold(threshold: number) {
+        this.storageThreshold = threshold;
+    }
+
+    setPaused(paused: boolean) {
+        this.isPaused = paused;
+    }
+
+    private getStorageInfo(): { percent: number; free: number; total: number } {
+        const dir = path.resolve(this.downloadDir);
+        if (!fs.existsSync(dir)) {
+            fs.ensureDirSync(dir);
+        }
+
+        try {
+            const output = execSync(`df -B1 "${dir}"`, { encoding: 'utf8' });
+            const lines = output.trim().split('\n');
+            if (lines.length >= 2) {
+                const line = lines[1] ?? '';
+                if (line) {
+                    const line = lines[1] ?? '';
+                    const parts = line.split(/\s+/);
+                    const total = parseInt(parts[1] ?? '0', 10) || 0;
+                    const used = parseInt(parts[2] ?? '0', 10) || 0;
+                    const free = parseInt(parts[3] ?? '0', 10) || 0;
+                    const percent = total > 0 ? Math.round((used / total) * 100) : 0;
+                    return { percent, free, total };
+                }
+            }
+        } catch (e) {
+            // Ignore
+        }
+        return { percent: 0, free: 0, total: 0 };
     }
 
     start() {
@@ -23,7 +79,7 @@ export class Dashboard {
         if (this.interval) clearInterval(this.interval);
         try {
             this.render();
-        } catch (e) {}
+        } catch (e) { }
         console.log('\nDownload complete or paused.');
     }
 
@@ -35,16 +91,26 @@ export class Dashboard {
 
         // Clear screen and move to top
         process.stdout.write('\x1Bc');
-        
+
         console.log('=== Batch Video Downloader Dashboard ===\n');
-        
+
+        // Storage Info
+        const storage = this.getStorageInfo();
+        const storageColor = storage.percent >= this.storageThreshold ? '🔴' : (storage.percent >= 80 ? '🟡' : '🟢');
+        console.log(`${storageColor} Storage: ${storage.percent}% used | ${formatBytes(storage.free)} free of ${formatBytes(storage.total)}`);
+        if (this.isPaused) {
+            console.log(`   ⏸️  PAUSED - Storage threshold hit (${this.storageThreshold}%). Free up space to resume.\n`);
+        } else {
+            console.log();
+        }
+
         // Overall Progress
         const completed = stats.find(s => s.status === 'COMPLETED')?.count || 0;
         const progress = total > 0 ? (completed / total) * 100 : 0;
         const barWidth = 50;
         const filled = Math.round((progress / 100) * barWidth);
         const bar = '█'.repeat(filled) + '░'.repeat(barWidth - filled);
-        
+
         console.log(`Overall: [${bar}] ${progress.toFixed(1)}% (${completed}/${total})`);
         console.log(`Status: ${stats.map(s => `${s.status}: ${s.count}`).join(', ')}\n`);
 
@@ -67,7 +133,7 @@ export class Dashboard {
                     progressLine += ` (Error: ${lecture.error_message.substring(0, 30)}...)`;
                 }
                 console.log(progressLine);
-                
+
                 for (const cs of chunkStats) {
                     const perc = cs.total > 0 ? (cs.completed / cs.total) * 100 : 0;
                     const cBarWidth = 20;
